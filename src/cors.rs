@@ -117,6 +117,9 @@ impl Cors {
     }
 }
 
+/// A builder for the `Cors` fairing. This allows for a more flexible and dynamic way to configure
+/// cors headers without having to create a new `Cors` instance every time a configuration change
+/// is needed.
 #[derive(Default)]
 pub struct CorsBuilder {
     allow_origin: Option<HashSet<Origin>>,
@@ -158,6 +161,7 @@ impl CorsBuilder {
 
         Ok(self)
     }
+
     /// This will dynamically set the `access-control-allow-origin` header depending on if the
     /// incoming request is coming from a valid origin set by this method. As only 1 origin is
     /// allowed in this header, this must be dynamic to accept more than 1 origin.

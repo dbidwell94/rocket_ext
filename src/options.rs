@@ -15,7 +15,7 @@ use std::io::Cursor;
 ///
 /// #[rocket::main]
 /// async fn main() {
-///     let app = rocket::build().attach(Options).launch();
+///     let app = rocket::build().attach(Options);
 /// }
 /// ```
 pub struct Options;
