@@ -11,6 +11,8 @@ repository = "https://github.com/dbidwell94/rocket_ext"
 [dependencies]
 rocket = { version = "^0.5" }
 thiserror = { version = "^2.0" }
+http = { version = "^1.3" }
+
 
 [dev-dependencies]
 tokio = { version = "^1.45", features = ["test-util"] }

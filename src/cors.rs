@@ -1,5 +1,6 @@
 mod origin;
 
+use http::HeaderName;
 use origin::{Origin, OriginParseError};
 pub use rocket::http::Method;
 use rocket::{
@@ -8,11 +9,11 @@ use rocket::{
 };
 use std::{collections::HashSet, time::Duration};
 
-const CORS_ORIGIN: &str = "Access-Control-Allow-Origin";
-const CORS_HEADERS: &str = "Access-Control-Allow-Headers";
-const CORS_METHODS: &str = "Access-Control-Allow-Methods";
-const CORS_AGE: &str = "Access-Control-Max-Age";
-const CORS_CREDENTIALS: &str = "Access-Control-Allow-Credentials";
+const CORS_ORIGIN: HeaderName = http::header::ACCESS_CONTROL_ALLOW_ORIGIN;
+const CORS_HEADERS: HeaderName = http::header::ACCESS_CONTROL_ALLOW_HEADERS;
+const CORS_METHODS: HeaderName = http::header::ACCESS_CONTROL_ALLOW_METHODS;
+const CORS_AGE: HeaderName = http::header::ACCESS_CONTROL_MAX_AGE;
+const CORS_CREDENTIALS: HeaderName = http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS;
 
 #[derive(thiserror::Error, Debug)]
 #[cfg_attr(test, derive(Eq, PartialEq))]
@@ -55,7 +56,7 @@ pub enum CorsError {
 #[cfg_attr(test, derive(Eq, PartialEq))]
 pub struct Cors {
     origins: HashSet<Origin>,
-    headers: HashSet<String>,
+    headers: OrWildcard<HashSet<String>>,
     methods: HashSet<Method>,
     max_age: Option<Duration>,
     allow_creds: bool,
@@ -65,7 +66,7 @@ pub struct Cors {
 impl Fairing for Cors {
     fn info(&self) -> Info {
         Info {
-            name: "Cross-Origin-Resource-Sharing Fairing",
+            name: "Cross-Origin-Resource-Sharing",
             kind: Kind::Response,
         }
     }
@@ -73,7 +74,7 @@ impl Fairing for Cors {
     async fn on_response<'r>(&self, req: &'r rocket::Request<'_>, res: &mut rocket::Response<'r>) {
         let remote_origin = req
             .headers()
-            .get_one("origin")
+            .get_one(http::header::ORIGIN.as_str())
             .and_then(|s| Origin::try_from(s).ok());
 
         let cors_origin = if self.origins.is_empty() {
@@ -88,10 +89,26 @@ impl Fairing for Cors {
             return;
         };
 
-        res.set_header(Header::new(CORS_ORIGIN, cors_origin));
-        if !self.headers.is_empty() {
-            let cors_headers = self.headers.iter().cloned().collect::<Vec<_>>().join(", ");
-            res.set_header(Header::new(CORS_HEADERS, cors_headers));
+        res.set_header(Header::new(CORS_ORIGIN.as_str(), cors_origin));
+
+        match self.headers {
+            OrWildcard::Wildcard => {
+                let request_headers = req
+                    .headers()
+                    .iter()
+                    .map(|v| v.name().to_string())
+                    .collect::<HashSet<_>>();
+
+                res.set_header(Header::new(
+                    CORS_HEADERS.as_str(),
+                    request_headers.into_iter().collect::<Vec<_>>().join(", "),
+                ));
+            }
+            OrWildcard::Explicit(ref headers) if !headers.is_empty() => {
+                let cors_headers = headers.iter().cloned().collect::<Vec<_>>().join(", ");
+                res.set_header(Header::new(CORS_HEADERS.as_str(), cors_headers));
+            }
+            _ => {}
         }
         if !self.methods.is_empty() {
             let cors_methods = self
@@ -100,13 +117,38 @@ impl Fairing for Cors {
                 .map(|method| method.to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
-            res.set_header(Header::new(CORS_METHODS, cors_methods));
+            res.set_header(Header::new(CORS_METHODS.as_str(), cors_methods));
         }
         if let Some(max_age) = self.max_age {
-            res.set_header(Header::new(CORS_AGE, max_age.as_secs().to_string()));
+            res.set_header(Header::new(
+                CORS_AGE.as_str(),
+                max_age.as_secs().to_string(),
+            ));
         }
         if self.allow_creds {
-            res.set_header(Header::new(CORS_CREDENTIALS, "true"));
+            res.set_header(Header::new(CORS_CREDENTIALS.as_str(), "true"));
+        }
+    }
+}
+
+#[derive(Default, Eq, PartialEq, Debug)]
+enum OrWildcard<T>
+where
+    T: Default + Eq + PartialEq,
+{
+    #[default]
+    Wildcard,
+    Explicit(T),
+}
+
+impl<T> OrWildcard<T>
+where
+    T: Default + Eq + PartialEq,
+{
+    fn take_or_default(self) -> T {
+        match self {
+            OrWildcard::Wildcard => T::default(),
+            OrWildcard::Explicit(value) => value,
         }
     }
 }
@@ -124,7 +166,7 @@ impl Cors {
 pub struct CorsBuilder {
     allow_origin: Option<HashSet<Origin>>,
     allow_method: Option<HashSet<Method>>,
-    allow_header: Option<HashSet<String>>,
+    allow_header: Option<OrWildcard<HashSet<String>>>,
     access_max_age: Option<Duration>,
     allow_credentials: bool,
 }
@@ -238,11 +280,55 @@ impl CorsBuilder {
     ///     .build()
     ///     .expect("A valid CORS configuration");
     /// ```
-    pub fn with_header(mut self, header_name: impl Into<String>) -> Self {
-        let mut headers = self.allow_header.take().unwrap_or_default();
-        headers.insert(header_name.into());
-        self.allow_header = Some(headers);
+    pub fn with_header(mut self, header_name: impl ToString) -> Self {
+        let mut headers = self
+            .allow_header
+            .take()
+            .unwrap_or_default()
+            .take_or_default();
+        headers.insert(header_name.to_string());
 
+        self.allow_header = Some(OrWildcard::Explicit(headers));
+
+        self
+    }
+
+    /// This will set the `access-control-allow-headers` header to allow the specified header.
+    ///
+    /// #Example
+    /// ```
+    /// use rocket_ext::cors::Cors;
+    /// use http::header::{ACCEPT,CONTENT_TYPE};
+    /// let cors = Cors::builder()
+    ///     .with_headers(&["X-Custom-Header", "X-Other-Header"])
+    ///     // you may pass an http::header::HeaderName as well
+    ///     .with_headers(&[ACCEPT, CONTENT_TYPE])
+    ///     .build()
+    ///     .expect("A valid CORS configuration");
+    /// ```
+    pub fn with_headers(mut self, headers: &[impl ToString]) -> Self {
+        let mut header_set = self
+            .allow_header
+            .take()
+            .unwrap_or_default()
+            .take_or_default();
+
+        for header in headers {
+            header_set.insert(header.to_string());
+        }
+        self.allow_header = Some(OrWildcard::Explicit(header_set));
+
+        self
+    }
+
+    /// This will set the `access-control-allow-headers` header to allow any header. This is
+    /// equivalent to setting the header to `*`, which means any header is allowed. However, in
+    /// order to be more explicit, CORS will respond with the headers sent in the request. For
+    /// example: if the request contains the headers `X-Custom-Header` and `X-Other-Header`, then
+    /// the response will contain the header `Access-Control-Allow-Headers: X-Custom-Header,
+    /// X-Other-Header`.
+    pub fn with_any_header(mut self) -> Self {
+        self.allow_header = Some(OrWildcard::Wildcard);
         self
     }
 
@@ -401,7 +487,7 @@ mod tests {
 
         let method_header = res
             .headers()
-            .get_one(CORS_METHODS)
+            .get_one(CORS_METHODS.as_str())
             .map(|v| v.split(", ").collect::<Vec<_>>())
             .unwrap_or_default();
 
@@ -427,7 +513,7 @@ mod tests {
         req.add_header(Header::new("origin", TEST_ORIGIN));
         let res = req.dispatch().await;
 
-        let origin_header = res.headers().get_one(CORS_ORIGIN);
+        let origin_header = res.headers().get_one(CORS_ORIGIN.as_str());
 
         assert_eq!(origin_header, Some(TEST_ORIGIN));
 
@@ -450,8 +536,8 @@ mod tests {
         req.add_header(Header::new("origin", TEST_ORIGIN));
         let res = req.dispatch().await;
 
-        let origin_header = res.headers().get_one(CORS_ORIGIN);
-        let credential_header = res.headers().get_one(CORS_CREDENTIALS);
+        let origin_header = res.headers().get_one(CORS_ORIGIN.as_str());
+        let credential_header = res.headers().get_one(CORS_CREDENTIALS.as_str());
 
         assert_eq!(origin_header, Some(TEST_ORIGIN));
         assert_eq!(credential_header, Some("true"));
@@ -472,7 +558,7 @@ mod tests {
 
         let res = req.dispatch().await;
 
-        let header = res.headers().get_one(CORS_ORIGIN);
+        let header = res.headers().get_one(CORS_ORIGIN.as_str());
 
         assert!(header.is_none());
 
@@ -491,7 +577,7 @@ mod tests {
         req.add_header(Header::new("origin", "http://test.com"));
         let res = req.dispatch().await;
 
-        let header = res.headers().get_one(CORS_ORIGIN);
+        let header = res.headers().get_one(CORS_ORIGIN.as_str());
 
         assert!(header.is_none());
 
@@ -510,7 +596,7 @@ mod tests {
 
         let res = client.get("/some/route").dispatch().await;
 
-        let header = res.headers().get_one(CORS_AGE);
+        let header = res.headers().get_one(CORS_AGE.as_str());
 
         assert_eq!(header, Some("15"));
 
@@ -534,7 +620,7 @@ mod tests {
 
         let header = res
             .headers()
-            .get_one(CORS_HEADERS)
+            .get_one(CORS_HEADERS.as_str())
             .map(|val| val.split(", ").collect::<Vec<_>>())
             .unwrap_or_default();
 
