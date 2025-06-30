@@ -3,6 +3,7 @@ name = "rocket_ext"
 version = "0.1.0"
 edition = "2024"
 authors = ["Devin Bidwell <dbidwell@biddydev.com>"]
+keywords = ["rocket", "cors", "preflight", "headers"]
 license = "MIT OR Apache-2.0"
 description = "A Rocket extension for working with pre-flight requests and CORS headers."
 repository = "https://github.com/dbidwell94/rocket_ext"

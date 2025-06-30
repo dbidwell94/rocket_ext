@@ -1,9 +1,10 @@
 mod origin;
 
 use origin::{Origin, OriginParseError};
+pub use rocket::http::Method;
 use rocket::{
     fairing::{Fairing, Info, Kind},
-    http::{Header, Method},
+    http::Header,
 };
 use std::{collections::HashSet, time::Duration};
 
@@ -24,6 +25,32 @@ pub enum CorsError {
     OriginParse(#[from] OriginParseError),
 }
 
+/// A fairing that implements Cross-Origin Resource Sharing (CORS) headers for Rocket applications.
+/// This struct cannot be constructed on its own, but rather through the `CorsBuilder`. This is to
+/// allow for validation of the CORS configuration before it is applied.
+///
+/// #Example
+///
+/// ```rust
+/// use rocket_ext::cors::Cors;
+///
+/// #[rocket::main]
+/// async fn main() -> anyhow::Result<()> {
+///     let cors = Cors::builder()
+///         .with_origin("https://example.com")?
+///         .with_header("X-Custom-Header")
+///         .with_method(rocket::http::Method::Get)
+///         .with_max_age(std::time::Duration::from_secs(3600))
+///         .allow_credentials()
+///         .build()?;
+///
+///     let rocket = rocket::build().attach(cors);
+///
+///     Ok(())
+/// }
+///
+///
+/// ```
 #[derive(Debug)]
 #[cfg_attr(test, derive(Eq, PartialEq))]
 pub struct Cors {
@@ -109,6 +136,17 @@ impl CorsBuilder {
     /// This will dynamically set the `access-control-allow-origin` header depending on if the
     /// incoming request is coming from a valid origin set by this method. As only 1 origin is
     /// allowed in this header, this must be dynamic to accept more than 1 origin.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rocket_ext::cors::Cors;
+    /// let cors = Cors::builder()
+    ///     .with_origin("http://test.com")
+    ///     .expect("A valid URI")
+    ///     .build()
+    ///     .expect("A valid CORS configuration");
+    /// ```
     pub fn with_origin(
         mut self,
         url: impl TryInto<Origin, Error = OriginParseError>,
@@ -120,7 +158,20 @@ impl CorsBuilder {
 
         Ok(self)
     }
-
+    /// This will dynamically set the `access-control-allow-origin` header depending on if the
+    /// incoming request is coming from a valid origin set by this method. As only 1 origin is
+    /// allowed in this header, this must be dynamic to accept more than 1 origin.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rocket_ext::cors::Cors;
+    /// let cors = Cors::builder()
+    ///     .with_origins(["http://test.com", "https://othertest.com"])
+    ///     .expect("A valid URI")
+    ///     .build()
+    ///     .expect("A valid CORS configuration");
+    /// ```
     pub fn with_origins<T, I>(mut self, urls: I) -> Result<Self, CorsError>
     where
         I: IntoIterator<Item = T>,
@@ -135,6 +186,17 @@ impl CorsBuilder {
         Ok(self)
     }
 
+    /// This will set the `access-control-allow-methods` header to allow the specified HTTP method.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rocket_ext::cors::{Cors, Method};
+    /// let cors = Cors::builder()
+    ///     .with_method(Method::Get)
+    ///     .build()
+    ///     .expect("A valid CORS configuration");
+    /// ```
     pub fn with_method(mut self, method: Method) -> Self {
         let mut methods = self.allow_method.take().unwrap_or_default();
         methods.insert(method);
@@ -143,6 +205,17 @@ impl CorsBuilder {
         self
     }
 
+    /// This will set the `access-control-allow-methods` header to allow the specified HTTP method.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use rocket_ext::cors::{Cors, Method};
+    /// let cors = Cors::builder()
+    ///     .with_methods(&[Method::Get, Method::Post])
+    ///     .build()
+    ///     .expect("A valid CORS configuration");
+    /// ```
     pub fn with_methods(mut self, methods_to_insert: &[Method]) -> Self {
         let mut methods = self.allow_method.take().unwrap_or_default();
         methods.extend(methods_to_insert);
@@ -151,6 +224,16 @@ impl CorsBuilder {
         self
     }
 
+    /// This will set the `access-control-allow-headers` header to allow the specified header.
+    ///
+    /// #Example
+    /// ```
+    /// use rocket_ext::cors::Cors;
+    /// let cors = Cors::builder()
+    ///     .with_header("X-Custom-Header")
+    ///     .build()
+    ///     .expect("A valid CORS configuration");
+    /// ```
     pub fn with_header(mut self, header_name: impl Into<String>) -> Self {
         let mut headers = self.allow_header.take().unwrap_or_default();
         headers.insert(header_name.into());
@@ -159,17 +242,61 @@ impl CorsBuilder {
         self
     }
 
+    /// This will set the `access-control-max-age` header to specify how long the results of a
+    /// preflight request can be cached.
+    ///
+    /// #Example
+    /// ```rust
+    /// use rocket_ext::cors::Cors;
+    /// let cors = Cors::builder()
+    ///     .with_max_age(std::time::Duration::from_secs(3600))
+    ///     .build()
+    ///     .expect("A valid CORS configuration");
+    /// ```
     pub fn with_max_age(mut self, age: Duration) -> Self {
         self.access_max_age = Some(age);
 
         self
     }
 
+    /// This will set the `access-control-allow-credentials` header to allow credentials to be
+    /// sent. This is only valid if an `access-control-allow-origin` header is also set.
+    ///
+    /// #Example
+    ///
+    /// ```rust
+    /// use rocket_ext::cors::Cors;
+    /// let cors = Cors::builder()
+    ///     .allow_credentials()
+    ///     .with_origin("https://example.com")
+    ///     .expect("A valid URI")
+    ///     .build()
+    ///     .expect("A valid CORS configuration");
+    /// ```
     pub fn allow_credentials(mut self) -> Self {
         self.allow_credentials = true;
         self
     }
 
+    /// This will build the `Cors` configuration. If `allow_credentials` is set to true, then
+    /// the `with_origin` must have been called, otherwise an error will be returned.
+    ///
+    /// See the [official CORS documentation](https://developer.mozilla.org/en-US/docs/Web/HTTP/Guides/CORS/Errors/CORSNotSupportingCredentials)
+    ///
+    /// #Example
+    /// ```rust
+    /// use rocket_ext::cors::{Cors, Method};
+    ///
+    /// let cors = Cors::builder()
+    ///     .allow_credentials()
+    ///     .with_origin("https://example.com")
+    ///     .expect("A valid URI")
+    ///     .with_max_age(std::time::Duration::from_secs(3600))
+    ///     .with_header("X-Custom-Header")
+    ///     .with_method(Method::Get)
+    ///     .build()
+    ///     .expect("A valid CORS configuration");
+    /// ```
     pub fn build(self) -> Result<Cors, CorsError> {
         if self.allow_credentials && self.allow_origin.is_none() {
             return Err(CorsError::WithCredentialsMissingOrigin);

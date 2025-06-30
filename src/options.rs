@@ -10,12 +10,12 @@ use std::io::Cursor;
 /// that `/test/route` has both `GET` and `POST` routes implemented.
 ///
 ///# Example
-/// ```no_run
-/// use rocket_ext::Options;
+/// ```rust
+/// use rocket_ext::prelude::Options;
 ///
-/// #[rocket::launch]
-/// fn main() {
-///     let app = rocket::build().attach(Options).launch()
+/// #[rocket::main]
+/// async fn main() {
+///     let app = rocket::build().attach(Options).launch();
 /// }
 /// ```
 pub struct Options;
