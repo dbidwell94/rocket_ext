@@ -1,8 +1,8 @@
-# rocket-ext
+# rocket_ext
 
 <!--toc:start-->
 
-- [rocket-ext](#rocket-ext)
+- [rocket_ext](#rocket_ext)
   - [Features](#features)
   - [Usage](#usage)
     - [Docs](#docs)
@@ -36,7 +36,7 @@ rocket-ext = { version = "*" }
 
 ### Docs
 
-Docs are available at [docs.rs/rocket-ext](https://docs.rs/rocket-ext).
+Docs are available at [docs.rs/rocket_ext](https://docs.rs/rocket_ext/latest/rocket_ext).
 
 ### Example
 
