@@ -24,7 +24,7 @@ pub struct Options;
 impl Fairing for Options {
     fn info(&self) -> Info {
         Info {
-            name: "Options Fairing",
+            name: "Options Pre-Flight",
             kind: Kind::Response,
         }
     }
@@ -47,7 +47,10 @@ impl Fairing for Options {
             return;
         }
 
-        res.set_header(Header::new("Allow", allowed_methods.join(", ")));
+        res.set_header(Header::new(
+            http::header::ALLOW.as_str(),
+            allowed_methods.join(", "),
+        ));
         res.set_status(Status::Ok);
         res.set_sized_body(0, Cursor::new(""));
     }
