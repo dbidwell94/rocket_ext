@@ -6,7 +6,7 @@
   - [Features](#features)
   - [Usage](#usage)
     - [Docs](#docs)
-    - [Example](#example)
+    - [Quick Start](#quick-start)
   - [API](#api)
     - [Building CORS Fairing](#building-cors-fairing)
     - [Error Handling](#error-handling)
@@ -38,7 +38,7 @@ rocket-ext = { version = "*" }
 
 Docs are available at [docs.rs/rocket_ext](https://docs.rs/rocket_ext/latest/rocket_ext).
 
-### Example
+### Quick Start
 
 ```rust
 use rocket_ext::{cors::Cors, options::Options};
