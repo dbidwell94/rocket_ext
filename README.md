@@ -79,6 +79,9 @@ async fn main() -> anyhow::Result<()> {
 
 - If you attempt to allow credentials without specifying an origin,
   a `CorsError::WithCredentialsMissingOrigin` will be returned.
+- If you pass in an invalid origin, a `CorsError::InvalidOrigin` will be returned.
+  An `Origin` must contain a scheme, host, and optionally a port.
+  (e.g. `http://example.com:8080`, `https://example.com`, or `http://localhost:8005`)
 
 ## License
 
