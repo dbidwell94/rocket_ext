@@ -1,6 +1,7 @@
 mod origin;
 
-use http::{HeaderName, header::ALLOW};
+use http::HeaderName;
+use itertools::Itertools;
 use lasso::{Rodeo, Spur};
 use origin::{Origin, OriginParseError};
 pub use rocket::http::Method;
@@ -19,6 +20,12 @@ const CORS_HEADERS: HeaderName = http::header::ACCESS_CONTROL_ALLOW_HEADERS;
 const CORS_METHODS: HeaderName = http::header::ACCESS_CONTROL_ALLOW_METHODS;
 const CORS_AGE: HeaderName = http::header::ACCESS_CONTROL_MAX_AGE;
 const CORS_CREDENTIALS: HeaderName = http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS;
+
+const OPTIONS_ALLOW_HEADERS: HeaderName = http::header::ALLOW;
+
+const REQUEST_METHODS: HeaderName = http::header::ACCESS_CONTROL_REQUEST_METHOD;
+const REQUEST_HEADERS: HeaderName = http::header::ACCESS_CONTROL_REQUEST_HEADERS;
+const REQUEST_ORIGIN: HeaderName = http::header::ORIGIN;
 
 type PathMap = HashMap<Spur, HashSet<Method>>;
 
@@ -65,8 +72,11 @@ fn default_options_handler<'r>(
 #[derive(thiserror::Error, Debug)]
 #[cfg_attr(test, derive(Eq, PartialEq))]
 pub enum CorsError {
+    /// This error is returned when the `allow_credentials` method is called without a valid origin
+    /// set. Credentials can only be sent when the `access-control-allow-origin` header is set to a
+    /// valid origin.
     #[error(
-        "access-control-allow-credentials was attempted to be set to true with a wildcard access-control-allow-origin value"
+        "access-control-allow-credentials was attempted to be set to true with a wildcard or empty access-control-allow-origin value"
     )]
     WithCredentialsMissingOrigin,
     #[error(transparent)]
@@ -121,10 +131,13 @@ impl Fairing for Cors {
     async fn on_ignite(&self, rocket: rocket::Rocket<rocket::Build>) -> rocket::fairing::Result {
         let mut rodeo = Rodeo::default();
 
+        // Lookup table to ensure that routes are not added multiple times
         let mut routes_added = HashSet::new();
 
+        // These are the built OPTIONS routes that will be mounted
         let mut options_routes = Vec::new();
 
+        // This is our Spur lookup table for routes and methods
         let mut path_map = PathMap::new();
 
         for route in rocket.routes() {
@@ -156,6 +169,24 @@ impl Fairing for Cors {
     }
 
     async fn on_response<'r>(&self, req: &'r rocket::Request<'_>, res: &mut rocket::Response<'r>) {
+        if req.method() == Method::Options {
+            self.handle_options(req, res);
+            return;
+        }
+
+        let remote_origin = req
+            .headers()
+            .get_one(REQUEST_ORIGIN.as_str())
+            .and_then(|s| Origin::try_from(s).ok());
+    }
+}
+
+impl Cors {
+    pub fn builder() -> CorsBuilder {
+        CorsBuilder::default()
+    }
+
+    fn handle_options<'r>(&self, req: &'r rocket::Request<'_>, res: &mut rocket::Response<'r>) {
         let Some(cors_state) = req.rocket().state::<CorsState>() else {
             return;
         };
@@ -177,100 +208,73 @@ impl Fairing for Cors {
         }
 
         res.set_header(Header::new(
-            ALLOW.as_str(),
+            OPTIONS_ALLOW_HEADERS.as_str(),
             methods
                 .clone()
                 .into_iter()
                 .map(|method| method.as_str())
-                .collect::<Vec<_>>()
                 .join(", "),
         ));
 
-        let remote_origin = req
-            .headers()
-            .get_one(http::header::ORIGIN.as_str())
-            .and_then(|s| Origin::try_from(s).ok());
-
-        let cors_origin = match self.origins {
-            OrWildcard::Wildcard => remote_origin.map(|origin| origin.to_string()),
-            OrWildcard::Explicit(ref origins) => remote_origin.and_then(|origin| {
-                if origins.contains(&origin) {
-                    Some(origin.to_string())
-                } else {
-                    None
-                }
-            }),
+        let Some(requested_headers) = req.headers().get_one(REQUEST_HEADERS.as_str()).map(|s| {
+            s.split(',')
+                .map(|s| s.trim())
+                .map(String::from)
+                .collect::<HashSet<_>>()
+        }) else {
+            return;
         };
 
-        if let Some(cors_origin) = cors_origin {
-            res.set_header(Header::new(CORS_ORIGIN.as_str(), cors_origin));
-        }
-
-        match self.headers {
+        let built_header = match self.headers {
             OrWildcard::Wildcard => {
-                let request_headers = req
-                    .headers()
-                    .iter()
-                    .map(|v| v.name().to_string())
-                    .collect::<HashSet<_>>();
+                // If the header is a wildcard, we respond with the requested headers
+                Some(requested_headers.iter().join(", "))
+            }
+            OrWildcard::Explicit(ref headers) => {
+                // If the header is explicit, we respond with the allowed headers
+                if !requested_headers.is_subset(headers) {
+                    None
+                } else {
+                    Some(requested_headers.iter().join(", "))
+                }
+            }
+        };
 
-                res.set_header(Header::new(
-                    CORS_HEADERS.as_str(),
-                    request_headers.into_iter().collect::<Vec<_>>().join(", "),
-                ));
-            }
-            OrWildcard::Explicit(ref headers) if !headers.is_empty() => {
-                let cors_headers = headers.iter().cloned().collect::<Vec<_>>().join(", ");
-                res.set_header(Header::new(CORS_HEADERS.as_str(), cors_headers));
-            }
-            _ => {}
-        }
-        if !self.methods.is_empty() {
-            let cors_methods = self
-                .methods
-                .iter()
-                .map(|method| method.to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            res.set_header(Header::new(CORS_METHODS.as_str(), cors_methods));
-        }
-        if let Some(max_age) = self.max_age {
-            res.set_header(Header::new(
-                CORS_AGE.as_str(),
-                max_age.as_secs().to_string(),
-            ));
-        }
-        if self.allow_creds {
-            res.set_header(Header::new(CORS_CREDENTIALS.as_str(), "true"));
+        if let Some(built_header) = built_header
+            && !built_header.is_empty()
+        {
+            res.set_header(Header::new(CORS_HEADERS.as_str(), built_header));
         }
     }
 }
 
-#[derive(Default, Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug)]
 enum OrWildcard<T>
 where
-    T: Default + Eq + PartialEq,
+    T: Default + Eq + PartialEq + Default,
 {
-    #[default]
     Wildcard,
     Explicit(T),
 }
 
+impl<T> Default for OrWildcard<T>
+where
+    T: Default + Eq + PartialEq + Default,
+{
+    fn default() -> Self {
+        OrWildcard::Explicit(T::default())
+    }
+}
+
 impl<T> OrWildcard<T>
 where
-    T: Default + Eq + PartialEq,
+    T: Default + Eq + PartialEq + Default,
 {
     fn take_or_default(self) -> T {
         match self {
             OrWildcard::Wildcard => T::default(),
             OrWildcard::Explicit(value) => value,
         }
-    }
-}
-
-impl Cors {
-    pub fn builder() -> CorsBuilder {
-        CorsBuilder::default()
     }
 }
 
@@ -357,10 +361,7 @@ impl CorsBuilder {
     }
 
     /// This will set the `access-control-allow-origin` header to allow any origin. This is
-    /// equivalent to setting the header to `*`, which means any origin is allowed. However,
-    /// in order to be more explicit, CORS will respond with the origin sent in the request. For
-    /// example: if the request contains the origin `https://example.com`, then the response will
-    /// contain the header `Access-Control-Allow-Origin: https://example.com`.
+    /// equivalent to setting the header to `*`, which means any origin is allowed.
     ///
     /// # Example
     ///
@@ -649,11 +650,14 @@ mod tests {
 
         let req = client.options("/some/route").dispatch().await;
 
-        let allow_header = req.headers().get_one(ALLOW.as_str()).map(|s| {
-            s.split(", ")
-                .map(|method| Method::from_str(method).expect("A valid method"))
-                .collect::<HashSet<_>>()
-        });
+        let allow_header = req
+            .headers()
+            .get_one(OPTIONS_ALLOW_HEADERS.as_str())
+            .map(|s| {
+                s.split(", ")
+                    .map(|method| Method::from_str(method).expect("A valid method"))
+                    .collect::<HashSet<_>>()
+            });
 
         let mut expected_set = HashSet::new();
         expected_set.insert(Method::Post);
@@ -676,11 +680,14 @@ mod tests {
 
         let res = client.options("/some/dynamic/string").dispatch().await;
 
-        let allow_header = res.headers().get_one(ALLOW.as_str()).map(|s| {
-            s.split(", ")
-                .map(|s| Method::from_str(s).expect("A valid method"))
-                .collect::<HashSet<_>>()
-        });
+        let allow_header = res
+            .headers()
+            .get_one(OPTIONS_ALLOW_HEADERS.as_str())
+            .map(|s| {
+                s.split(", ")
+                    .map(|s| Method::from_str(s).expect("A valid method"))
+                    .collect::<HashSet<_>>()
+            });
 
         let mut expected_header = HashSet::new();
         expected_header.insert(Method::Get);
