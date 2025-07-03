@@ -954,4 +954,39 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_cors_with_any_header() -> anyhow::Result<()> {
+        let cors = Cors::builder()
+            .with_any_origin()
+            .with_method(Method::Get)
+            .with_any_header()
+            .build()?;
+
+        let rocket = rocket_with_cors(cors, &routes![get_route]).await?;
+
+        let client = Client::tracked(rocket).await?;
+
+        let mut req = client.options("/some/route");
+        req.add_header(Header::new(ORIGIN.as_str(), EXPECTED_ORIGIN.to_string()));
+        req.add_header(Header::new(
+            REQUEST_HEADERS.as_str(),
+            "x-custom-header, x-custom-header-2",
+        ));
+
+        let res = req.dispatch().await;
+
+        let expected_headers = ["x-custom-header", "x-custom-header-2"]
+            .into_iter()
+            .collect::<HashSet<_>>();
+
+        let header = res
+            .headers()
+            .get_one(CORS_HEADERS.as_str())
+            .map(|val| val.split(", ").collect::<HashSet<_>>());
+
+        assert_eq!(header, Some(expected_headers));
+
+        Ok(())
+    }
 }

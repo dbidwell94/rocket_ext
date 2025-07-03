@@ -1,6 +1,6 @@
 [package]
 name = "rocket_ext"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["Devin Bidwell <dbidwell@biddydev.com>"]
 keywords = ["rocket", "cors", "preflight", "headers"]

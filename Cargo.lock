@@ -974,7 +974,7 @@ dependencies = [
 
 [[package]]
 name = "rocket_ext"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "http 1.3.1",

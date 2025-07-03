@@ -14,8 +14,7 @@
   <!--toc:end-->
 
 A Rust extension crate for [Rocket](https://rocket.rs/) that provides a flexible
-and configurable Cross-Origin Resource Sharing (CORS) fairing,
-as well as an `Options` fairing for easy pre-flight request handling.
+and configurable Cross-Origin Resource Sharing (CORS) fairing.
 
 ## Features
 
@@ -41,7 +40,7 @@ Docs are available at [docs.rs/rocket_ext](https://docs.rs/rocket_ext/latest/roc
 ### Quick Start
 
 ```rust
-use rocket_ext::{cors::Cors, options::Options};
+use rocket_ext::cors::Cors;
 // Also available under `rocket_ext::prelude::*`
 
 #[rocket::main]
@@ -54,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
         .allow_credentials()
         .build()?;
 
-    let rocket = rocket::build().attach(cors).attach(Options);
+    let rocket = rocket::build().attach(cors);
 
     Ok(())
 }
@@ -67,10 +66,11 @@ async fn main() -> anyhow::Result<()> {
 - `Cors::builder()`: Start building a CORS configuration.
 - `.with_origin(origin)`: Allow a specific origin.
 - `.with_origins([origins])`: Allow multiple origins.
+- `.with_any_origin()`: Allow any origin with the use of a wildcard (`*`).
 - `.with_method(method)`: Allow a specific HTTP method.
-- `.with_methods([methods])`: Allow multiple HTTP methods.
+- `.with_methods(&[methods])`: Allow multiple HTTP methods.
 - `.with_header(header)`: Allow a specific header.
-- `.with_headers([headers])`: Allow multiple headers.
+- `.with_headers(&[headers])`: Allow multiple headers.
 - `.with_any_header()`: Allow any header.
 - `.with_max_age(duration)`: Set the max age for preflight requests.
 - `.allow_credentials()`: Allow credentials.
