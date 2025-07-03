@@ -193,6 +193,10 @@ impl Fairing for Cors {
     }
 
     async fn on_response<'r>(&self, req: &'r rocket::Request<'_>, res: &mut rocket::Response<'r>) {
+        // origin check failed, don't process OPTIONS or CORS
+        if !self.handle_origin(req, res) {
+            return;
+        }
         if req.method() == Method::Options {
             self.handle_options(req, res);
         } else {
@@ -204,6 +208,37 @@ impl Fairing for Cors {
 impl Cors {
     pub fn builder() -> CorsBuilder {
         CorsBuilder::default()
+    }
+
+    fn handle_origin<'r>(
+        &self,
+        req: &'r rocket::Request<'_>,
+        res: &mut rocket::Response<'r>,
+    ) -> bool {
+        let Some(origin) = req
+            .headers()
+            .get_one(REQUEST_ORIGIN.as_str())
+            .and_then(|s| Origin::try_from(s).ok())
+        else {
+            // If there is no origin header, we do not set the CORS or OPTIONS headers
+            return false;
+        };
+
+        match self.origins {
+            OrWildcard::Wildcard => {
+                res.set_header(Header::new(CORS_ORIGIN.as_str(), "*".to_string()));
+            }
+            OrWildcard::Explicit(ref origins) => {
+                if origins.contains(&origin) {
+                    res.set_header(Header::new(CORS_ORIGIN.as_str(), origin.to_string()));
+                } else {
+                    // If the origin is not allowed, we do not set the header
+                    return false;
+                }
+            }
+        }
+
+        true
     }
 
     fn handle_cors<'r>(&self, req: &'r rocket::Request<'_>, res: &mut rocket::Response<'r>) {
