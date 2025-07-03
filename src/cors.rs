@@ -23,8 +23,6 @@ const CORS_METHODS: HeaderName = http::header::ACCESS_CONTROL_ALLOW_METHODS;
 const CORS_AGE: HeaderName = http::header::ACCESS_CONTROL_MAX_AGE;
 const CORS_CREDENTIALS: HeaderName = http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS;
 
-const OPTIONS_ALLOW_HEADERS: HeaderName = http::header::ALLOW;
-
 const REQUEST_METHOD: HeaderName = http::header::ACCESS_CONTROL_REQUEST_METHOD;
 const REQUEST_HEADERS: HeaderName = http::header::ACCESS_CONTROL_REQUEST_HEADERS;
 const REQUEST_ORIGIN: HeaderName = http::header::ORIGIN;
@@ -241,29 +239,7 @@ impl Cors {
         true
     }
 
-    fn handle_cors<'r>(&self, req: &'r rocket::Request<'_>, res: &mut rocket::Response<'r>) {
-        let Some(remote_origin) = req
-            .headers()
-            .get_one(REQUEST_ORIGIN.as_str())
-            .and_then(|s| Origin::try_from(s).ok())
-        else {
-            return;
-        };
-
-        match self.origins {
-            OrWildcard::Wildcard => {
-                res.set_header(Header::new(CORS_ORIGIN.as_str(), "*".to_string()));
-            }
-            OrWildcard::Explicit(ref origins) => {
-                if origins.contains(&remote_origin) {
-                    res.set_header(Header::new(CORS_ORIGIN.as_str(), remote_origin.to_string()));
-                } else {
-                    // If the origin is not allowed, we do not set the header
-                    return;
-                }
-            }
-        }
-
+    fn handle_cors<'r>(&self, _: &'r rocket::Request<'_>, res: &mut rocket::Response<'r>) {
         if self.allow_creds {
             res.set_header(Header::new(CORS_CREDENTIALS.as_str(), "true".to_string()));
         }
@@ -640,7 +616,11 @@ impl CorsBuilder {
     ///     .expect("A valid CORS configuration");
     /// ```
     pub fn build(self) -> Result<Cors, CorsError> {
-        if self.allow_credentials && self.allow_origin.is_none() {
+        // fail if no origin is set and credentials are allowed, or if the origin is set to
+        // wildcard
+        if self.allow_credentials
+            && (self.allow_origin.is_none() || self.allow_origin == Some(OrWildcard::Wildcard))
+        {
             return Err(CorsError::WithCredentialsMissingOrigin);
         }
 
@@ -660,7 +640,10 @@ mod tests {
 
     use super::*;
     use crate::cors::origin::*;
+    use http::header::ORIGIN;
     use rocket::{Ignite, Rocket, get, local::asynchronous::Client, post, routes};
+
+    const EXPECTED_ORIGIN: &str = "https://test.com";
 
     #[get("/some/route")]
     fn get_route() {}
@@ -684,7 +667,7 @@ mod tests {
 
     #[test]
     fn test_cors_builder_origin() -> anyhow::Result<()> {
-        let cors = Cors::builder().with_origin("https://test.com")?.build()?;
+        let cors = Cors::builder().with_origin(EXPECTED_ORIGIN)?.build()?;
 
         let origins = cors.origins.take_or_default();
 
@@ -740,21 +723,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_options_allow_headers() -> anyhow::Result<()> {
-        let rocket =
-            rocket_with_cors(Cors::builder().build()?, &routes![get_route, post_route]).await?;
+        let rocket = rocket_with_cors(
+            Cors::builder()
+                .with_methods(&[Method::Get, Method::Post, Method::Delete])
+                .with_any_origin()
+                .build()?,
+            &routes![get_route, post_route],
+        )
+        .await?;
 
         let client = Client::tracked(rocket).await?;
 
-        let req = client.options("/some/route").dispatch().await;
+        let mut req = client.options("/some/route");
 
-        let allow_header = req
-            .headers()
-            .get_one(OPTIONS_ALLOW_HEADERS.as_str())
-            .map(|s| {
-                s.split(", ")
-                    .map(|method| Method::from_str(method).expect("A valid method"))
-                    .collect::<HashSet<_>>()
-            });
+        req.add_header(Header::new(ORIGIN.as_str(), EXPECTED_ORIGIN.to_string()));
+
+        let res = req.dispatch().await;
+
+        let allow_header = res.headers().get_one(CORS_METHODS.as_str()).map(|s| {
+            s.split(", ")
+                .map(|method| Method::from_str(method).expect("A valid method"))
+                .collect::<HashSet<_>>()
+        });
 
         let mut expected_set = HashSet::new();
         expected_set.insert(Method::Post);
@@ -768,23 +758,26 @@ mod tests {
     #[tokio::test]
     async fn test_options_dynamic_allow_headers() -> anyhow::Result<()> {
         let rocket = rocket_with_cors(
-            Cors::builder().build()?,
+            Cors::builder()
+                .with_any_origin()
+                .with_methods(&[Method::Get, Method::Post])
+                .build()?,
             &routes![get_dynamic, post_dynamic],
         )
         .await?;
 
         let client = Client::tracked(rocket).await?;
 
-        let res = client.options("/some/dynamic/string").dispatch().await;
+        let mut req = client.options("/some/dynamic/string");
+        req.add_header(Header::new(ORIGIN.as_str(), EXPECTED_ORIGIN.to_string()));
 
-        let allow_header = res
-            .headers()
-            .get_one(OPTIONS_ALLOW_HEADERS.as_str())
-            .map(|s| {
-                s.split(", ")
-                    .map(|s| Method::from_str(s).expect("A valid method"))
-                    .collect::<HashSet<_>>()
-            });
+        let res = req.dispatch().await;
+
+        let allow_header = res.headers().get_one(CORS_METHODS.as_str()).map(|s| {
+            s.split(", ")
+                .map(|s| Method::from_str(s).expect("A valid method"))
+                .collect::<HashSet<_>>()
+        });
 
         let mut expected_header = HashSet::new();
         expected_header.insert(Method::Get);
@@ -796,50 +789,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_build_with_allowed_headers() -> anyhow::Result<()> {
-        let cors = Cors::builder()
-            .with_methods(&[Method::Get, Method::Post])
-            .build()?;
-
-        let rocket = rocket_with_cors(cors, &routes![get_route]).await?;
-
-        let client = Client::tracked(rocket).await?;
-
-        let res = client.get("/some/route").dispatch().await;
-
-        let expected_methods = [Method::Get.to_string(), Method::Post.to_string()];
-
-        let method_header = res
-            .headers()
-            .get_one(CORS_METHODS.as_str())
-            .map(|v| v.split(", ").collect::<Vec<_>>())
-            .unwrap_or_default();
-
-        assert!(
-            expected_methods
-                .iter()
-                .all(|expected| method_header.contains(&expected.as_str()))
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn test_origin_header() -> anyhow::Result<()> {
-        const TEST_ORIGIN: &str = "https://test.com";
-        let cors = Cors::builder().with_origin(TEST_ORIGIN)?.build()?;
+        let cors = Cors::builder().with_origin(EXPECTED_ORIGIN)?.build()?;
 
         let rocket = rocket_with_cors(cors, &routes![get_route]).await?;
 
         let client = Client::tracked(rocket).await?;
 
         let mut req = client.get("/some/route");
-        req.add_header(Header::new("origin", TEST_ORIGIN));
+        req.add_header(Header::new("origin", EXPECTED_ORIGIN));
         let res = req.dispatch().await;
 
         let origin_header = res.headers().get_one(CORS_ORIGIN.as_str());
 
-        assert_eq!(origin_header, Some(TEST_ORIGIN));
+        assert_eq!(origin_header, Some(EXPECTED_ORIGIN));
 
         Ok(())
     }
@@ -859,7 +822,7 @@ mod tests {
 
         let origin_header = res.headers().get_one(CORS_ORIGIN.as_str());
 
-        assert_eq!(origin_header, Some(TEST_ORIGIN));
+        assert_eq!(origin_header, Some("*"));
 
         Ok(())
     }
@@ -931,6 +894,8 @@ mod tests {
     #[tokio::test]
     async fn test_cors_age() -> anyhow::Result<()> {
         let cors = Cors::builder()
+            .with_any_origin()
+            .with_methods(&[Method::Get])
             .with_max_age(Duration::from_secs(15))
             .build()?;
 
@@ -938,7 +903,11 @@ mod tests {
 
         let client = Client::tracked(rocket).await?;
 
-        let res = client.get("/some/route").dispatch().await;
+        let mut req = client.options("/some/route");
+
+        req.add_header(Header::new(ORIGIN.as_str(), EXPECTED_ORIGIN.to_string()));
+
+        let res = req.dispatch().await;
 
         let header = res.headers().get_one(CORS_AGE.as_str());
 
@@ -950,17 +919,26 @@ mod tests {
     #[tokio::test]
     async fn test_cors_allowed_headers() -> anyhow::Result<()> {
         let cors = Cors::builder()
-            .with_header("accept")
-            .with_header("custom")
+            .with_any_origin()
+            .with_method(Method::Get)
+            .with_header("x-custom-header")
+            .with_header("x-custom-header-2")
             .build()?;
 
-        let expected_headers = ["accept", "custom"];
+        let expected_headers = ["x-custom-header-2", "x-custom-header"];
 
         let rocket = rocket_with_cors(cors, &routes![get_route]).await?;
 
         let client = Client::tracked(rocket).await?;
 
-        let res = client.get("/some/route").dispatch().await;
+        let mut req = client.options("/some/route");
+        req.add_header(Header::new(ORIGIN.as_str(), EXPECTED_ORIGIN.to_string()));
+        req.add_header(Header::new(
+            REQUEST_HEADERS.as_str(),
+            "x-custom-header, x-custom-header-2",
+        ));
+
+        let res = req.dispatch().await;
 
         let header = res
             .headers()
