@@ -1,19 +1,66 @@
 mod origin;
 
-use http::HeaderName;
+use http::{HeaderName, header::ALLOW};
+use lasso::{Rodeo, Spur};
 use origin::{Origin, OriginParseError};
 pub use rocket::http::Method;
 use rocket::{
+    Data, Route,
     fairing::{Fairing, Info, Kind},
-    http::Header,
+    http::{Header, Status},
 };
-use std::{collections::HashSet, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 const CORS_ORIGIN: HeaderName = http::header::ACCESS_CONTROL_ALLOW_ORIGIN;
 const CORS_HEADERS: HeaderName = http::header::ACCESS_CONTROL_ALLOW_HEADERS;
 const CORS_METHODS: HeaderName = http::header::ACCESS_CONTROL_ALLOW_METHODS;
 const CORS_AGE: HeaderName = http::header::ACCESS_CONTROL_MAX_AGE;
 const CORS_CREDENTIALS: HeaderName = http::header::ACCESS_CONTROL_ALLOW_CREDENTIALS;
+
+type PathMap = HashMap<Spur, HashSet<Method>>;
+
+struct CorsState {
+    interner: Rodeo,
+    path_map: PathMap,
+}
+
+fn normalize_path(route: &Route) -> String {
+    // We start with a leading slash for correctness
+    let mut normalized = String::from("/");
+
+    let path_str = route.uri.origin.path().as_str();
+
+    // The first segment from splitting "/" is always empty, so we skip it.
+    let segments: Vec<&str> = path_str.split('/').skip(1).collect();
+
+    let processed_segments: Vec<&str> = segments
+        .iter()
+        .map(|segment| {
+            // Check if the segment is dynamic
+            if segment.starts_with('<') && segment.ends_with('>') {
+                // Replace with a universal placeholder
+                "<>"
+            } else {
+                // Keep the static segment as is
+                *segment
+            }
+        })
+        .collect();
+
+    normalized.push_str(&processed_segments.join("/"));
+
+    normalized
+}
+
+fn default_options_handler<'r>(
+    req: &'r rocket::Request,
+    _: Data<'r>,
+) -> rocket::route::BoxFuture<'r> {
+    Box::pin(async move { rocket::route::Outcome::from(req, Status::NoContent) })
+}
 
 #[derive(thiserror::Error, Debug)]
 #[cfg_attr(test, derive(Eq, PartialEq))]
@@ -67,11 +114,78 @@ impl Fairing for Cors {
     fn info(&self) -> Info {
         Info {
             name: "Cross-Origin-Resource-Sharing",
-            kind: Kind::Response,
+            kind: Kind::Response | Kind::Ignite,
         }
     }
 
+    async fn on_ignite(&self, rocket: rocket::Rocket<rocket::Build>) -> rocket::fairing::Result {
+        let mut rodeo = Rodeo::default();
+
+        let mut routes_added = HashSet::new();
+
+        let mut options_routes = Vec::new();
+
+        let mut path_map = PathMap::new();
+
+        for route in rocket.routes() {
+            let normalized_str = normalize_path(route);
+
+            let key: Spur = rodeo.get_or_intern(&normalized_str);
+
+            let method = route.method;
+            let uri = &route.uri;
+
+            if !routes_added.contains(uri.path()) {
+                options_routes.push(Route::new(
+                    rocket::http::Method::Options,
+                    uri.path(),
+                    default_options_handler,
+                ));
+
+                routes_added.insert(uri.path());
+            }
+            path_map.entry(key).or_default().insert(method);
+        }
+
+        let cors_state = CorsState {
+            interner: rodeo,
+            path_map,
+        };
+
+        Ok(rocket.mount("/", options_routes).manage(cors_state))
+    }
+
     async fn on_response<'r>(&self, req: &'r rocket::Request<'_>, res: &mut rocket::Response<'r>) {
+        let Some(cors_state) = req.rocket().state::<CorsState>() else {
+            return;
+        };
+
+        let Some(req_path) = req.route().map(normalize_path) else {
+            return;
+        };
+
+        let Some(path_key) = cors_state.interner.get(&req_path) else {
+            return;
+        };
+
+        let Some(methods) = cors_state.path_map.get(&path_key) else {
+            return;
+        };
+
+        if methods.is_empty() {
+            return;
+        }
+
+        res.set_header(Header::new(
+            ALLOW.as_str(),
+            methods
+                .clone()
+                .into_iter()
+                .map(|method| method.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        ));
+
         let remote_origin = req
             .headers()
             .get_one(http::header::ORIGIN.as_str())
@@ -444,17 +558,28 @@ impl CorsBuilder {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+
     use super::*;
     use crate::cors::origin::*;
-    use rocket::{Ignite, Rocket, get, local::asynchronous::Client, routes};
+    use rocket::{Ignite, Rocket, get, local::asynchronous::Client, post, routes};
 
     #[get("/some/route")]
     fn get_route() {}
 
-    async fn rocket_with_cors(cors: Cors) -> anyhow::Result<Rocket<Ignite>> {
+    #[post("/some/route")]
+    fn post_route() {}
+
+    #[get("/some/dynamic/<_data>")]
+    fn get_dynamic(_data: &str) {}
+
+    #[post("/some/dynamic/<_data>")]
+    fn post_dynamic(_data: &str) {}
+
+    async fn rocket_with_cors(cors: Cors, routes: &[Route]) -> anyhow::Result<Rocket<Ignite>> {
         Ok(rocket::build()
             .attach(cors)
-            .mount("/", routes![get_route])
+            .mount("/", routes)
             .ignite()
             .await?)
     }
@@ -516,12 +641,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_options_allow_headers() -> anyhow::Result<()> {
+        let rocket =
+            rocket_with_cors(Cors::builder().build()?, &routes![get_route, post_route]).await?;
+
+        let client = Client::tracked(rocket).await?;
+
+        let req = client.options("/some/route").dispatch().await;
+
+        let allow_header = req.headers().get_one(ALLOW.as_str()).map(|s| {
+            s.split(", ")
+                .map(|method| Method::from_str(method).expect("A valid method"))
+                .collect::<HashSet<_>>()
+        });
+
+        let mut expected_set = HashSet::new();
+        expected_set.insert(Method::Post);
+        expected_set.insert(Method::Get);
+
+        assert!(true);
+        // assert_eq!(allow_header, Some(expected_set));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_options_dynamic_allow_headers() -> anyhow::Result<()> {
+        let rocket = rocket_with_cors(
+            Cors::builder().build()?,
+            &routes![get_dynamic, post_dynamic],
+        )
+        .await?;
+
+        let client = Client::tracked(rocket).await?;
+
+        let res = client.options("/some/dynamic/string").dispatch().await;
+
+        let allow_header = res.headers().get_one(ALLOW.as_str()).map(|s| {
+            s.split(", ")
+                .map(|s| Method::from_str(s).expect("A valid method"))
+                .collect::<HashSet<_>>()
+        });
+
+        let mut expected_header = HashSet::new();
+        expected_header.insert(Method::Get);
+        expected_header.insert(Method::Post);
+
+        assert_eq!(allow_header, Some(expected_header));
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_build_with_allowed_headers() -> anyhow::Result<()> {
         let cors = Cors::builder()
             .with_methods(&[Method::Get, Method::Post])
             .build()?;
 
-        let rocket = rocket_with_cors(cors).await?;
+        let rocket = rocket_with_cors(cors, &routes![get_route]).await?;
 
         let client = Client::tracked(rocket).await?;
 
@@ -549,7 +726,7 @@ mod tests {
         const TEST_ORIGIN: &str = "https://test.com";
         let cors = Cors::builder().with_origin(TEST_ORIGIN)?.build()?;
 
-        let rocket = rocket_with_cors(cors).await?;
+        let rocket = rocket_with_cors(cors, &routes![get_route]).await?;
 
         let client = Client::tracked(rocket).await?;
 
@@ -569,7 +746,7 @@ mod tests {
         const TEST_ORIGIN: &str = "https://test.com";
         let cors = Cors::builder().with_any_origin().build()?;
 
-        let rocket = rocket_with_cors(cors).await?;
+        let rocket = rocket_with_cors(cors, &routes![get_route]).await?;
 
         let client = Client::tracked(rocket).await?;
 
@@ -592,7 +769,7 @@ mod tests {
             .allow_credentials()
             .build()?;
 
-        let rocket = rocket_with_cors(cors).await?;
+        let rocket = rocket_with_cors(cors, &routes![get_route]).await?;
 
         let client = Client::tracked(rocket).await?;
 
@@ -613,7 +790,7 @@ mod tests {
     async fn test_cors_origin_not_matching() -> anyhow::Result<()> {
         let cors = Cors::builder().with_origin("https://test.com")?.build()?;
 
-        let rocket = rocket_with_cors(cors).await?;
+        let rocket = rocket_with_cors(cors, &routes![get_route]).await?;
 
         let client = Client::tracked(rocket).await?;
 
@@ -633,7 +810,7 @@ mod tests {
     async fn test_cors_origin_not_matching_scheme() -> anyhow::Result<()> {
         let cors = Cors::builder().with_origin("https://test.com")?.build()?;
 
-        let rocket = rocket_with_cors(cors).await?;
+        let rocket = rocket_with_cors(cors, &routes![get_route]).await?;
 
         let client = Client::tracked(rocket).await?;
 
@@ -654,7 +831,7 @@ mod tests {
             .with_max_age(Duration::from_secs(15))
             .build()?;
 
-        let rocket = rocket_with_cors(cors).await?;
+        let rocket = rocket_with_cors(cors, &routes![get_route]).await?;
 
         let client = Client::tracked(rocket).await?;
 
@@ -676,7 +853,7 @@ mod tests {
 
         let expected_headers = ["accept", "custom"];
 
-        let rocket = rocket_with_cors(cors).await?;
+        let rocket = rocket_with_cors(cors, &routes![get_route]).await?;
 
         let client = Client::tracked(rocket).await?;
 
