@@ -9,9 +9,11 @@ use rocket::{
     Data, Route,
     fairing::{Fairing, Info, Kind},
     http::{Header, Status},
+    route::Outcome,
 };
 use std::{
     collections::{HashMap, HashSet},
+    str::FromStr,
     time::Duration,
 };
 
@@ -23,7 +25,7 @@ const CORS_CREDENTIALS: HeaderName = http::header::ACCESS_CONTROL_ALLOW_CREDENTI
 
 const OPTIONS_ALLOW_HEADERS: HeaderName = http::header::ALLOW;
 
-const REQUEST_METHODS: HeaderName = http::header::ACCESS_CONTROL_REQUEST_METHOD;
+const REQUEST_METHOD: HeaderName = http::header::ACCESS_CONTROL_REQUEST_METHOD;
 const REQUEST_HEADERS: HeaderName = http::header::ACCESS_CONTROL_REQUEST_HEADERS;
 const REQUEST_ORIGIN: HeaderName = http::header::ORIGIN;
 
@@ -66,7 +68,29 @@ fn default_options_handler<'r>(
     req: &'r rocket::Request,
     _: Data<'r>,
 ) -> rocket::route::BoxFuture<'r> {
-    Box::pin(async move { rocket::route::Outcome::from(req, Status::NoContent) })
+    Box::pin(async move {
+        let Some(state) = req.rocket().state::<CorsState>() else {
+            return Outcome::from(req, Status::InternalServerError);
+        };
+
+        let Some(route) = req.route() else {
+            return Outcome::from(req, Status::NotFound);
+        };
+
+        let normalized_path = normalize_path(route);
+
+        let methods_supported = state
+            .interner
+            .get(&normalized_path)
+            .and_then(|key| state.path_map.get(&key))
+            .is_some_and(|methods| !methods.is_empty());
+
+        if methods_supported {
+            Outcome::from(req, Status::NoContent)
+        } else {
+            Outcome::from(req, Status::MethodNotAllowed)
+        }
+    })
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -171,13 +195,9 @@ impl Fairing for Cors {
     async fn on_response<'r>(&self, req: &'r rocket::Request<'_>, res: &mut rocket::Response<'r>) {
         if req.method() == Method::Options {
             self.handle_options(req, res);
-            return;
+        } else {
+            self.handle_cors(req, res);
         }
-
-        let remote_origin = req
-            .headers()
-            .get_one(REQUEST_ORIGIN.as_str())
-            .and_then(|s| Origin::try_from(s).ok());
     }
 }
 
@@ -186,64 +206,106 @@ impl Cors {
         CorsBuilder::default()
     }
 
+    fn handle_cors<'r>(&self, req: &'r rocket::Request<'_>, res: &mut rocket::Response<'r>) {
+        let Some(remote_origin) = req
+            .headers()
+            .get_one(REQUEST_ORIGIN.as_str())
+            .and_then(|s| Origin::try_from(s).ok())
+        else {
+            return;
+        };
+
+        match self.origins {
+            OrWildcard::Wildcard => {
+                res.set_header(Header::new(CORS_ORIGIN.as_str(), "*".to_string()));
+            }
+            OrWildcard::Explicit(ref origins) => {
+                if origins.contains(&remote_origin) {
+                    res.set_header(Header::new(CORS_ORIGIN.as_str(), remote_origin.to_string()));
+                } else {
+                    // If the origin is not allowed, we do not set the header
+                    return;
+                }
+            }
+        }
+
+        if self.allow_creds {
+            res.set_header(Header::new(CORS_CREDENTIALS.as_str(), "true".to_string()));
+        }
+    }
+
     fn handle_options<'r>(&self, req: &'r rocket::Request<'_>, res: &mut rocket::Response<'r>) {
+        // SETUP
         let Some(cors_state) = req.rocket().state::<CorsState>() else {
             return;
         };
-
-        let Some(req_path) = req.route().map(normalize_path) else {
+        let Some(path_methods) = req
+            .route()
+            .map(normalize_path)
+            .and_then(|path| cors_state.interner.get(&path))
+            .and_then(|key| cors_state.path_map.get(&key))
+        else {
             return;
         };
+        let requested_method = req
+            .headers()
+            .get_one(REQUEST_METHOD.as_str())
+            .and_then(|s| Method::from_str(s).ok());
 
-        let Some(path_key) = cors_state.interner.get(&req_path) else {
-            return;
-        };
+        let requested_headers = req.headers().get_one(REQUEST_HEADERS.as_str()).map(|h| {
+            h.split(',')
+                .map(|s| s.trim())
+                .map(|s| s.to_owned())
+                .collect::<HashSet<_>>()
+        });
+        let truely_allowed_methods: HashSet<&Method> =
+            path_methods.intersection(&self.methods).collect();
 
-        let Some(methods) = cors_state.path_map.get(&path_key) else {
-            return;
-        };
+        // CHECKS
 
-        if methods.is_empty() {
+        // 1: make sure we have allowed methods
+        if truely_allowed_methods.is_empty() {
             return;
         }
 
-        res.set_header(Header::new(
-            OPTIONS_ALLOW_HEADERS.as_str(),
-            methods
-                .clone()
-                .into_iter()
-                .map(|method| method.as_str())
-                .join(", "),
-        ));
-
-        let Some(requested_headers) = req.headers().get_one(REQUEST_HEADERS.as_str()).map(|s| {
-            s.split(',')
-                .map(|s| s.trim())
-                .map(String::from)
-                .collect::<HashSet<_>>()
-        }) else {
+        // 2: Make sure the requested method is in the allowed methods.
+        if let Some(requested_method) = requested_method
+            && !truely_allowed_methods.contains(&requested_method)
+        {
             return;
-        };
+        }
 
-        let built_header = match self.headers {
-            OrWildcard::Wildcard => {
-                // If the header is a wildcard, we respond with the requested headers
-                Some(requested_headers.iter().join(", "))
-            }
-            OrWildcard::Explicit(ref headers) => {
-                // If the header is explicit, we respond with the allowed headers
+        // 3: Make sure the requested headers are allowed.
+        if let Some(ref requested_headers) = requested_headers {
+            if let OrWildcard::Explicit(ref headers) = self.headers {
                 if !requested_headers.is_subset(headers) {
-                    None
-                } else {
-                    Some(requested_headers.iter().join(", "))
+                    // If the requested headers are not a subset of the allowed headers, we do not
+                    // set the header
+                    return;
                 }
             }
-        };
+        }
 
-        if let Some(built_header) = built_header
-            && !built_header.is_empty()
-        {
-            res.set_header(Header::new(CORS_HEADERS.as_str(), built_header));
+        // BUILD HEADERS
+
+        // Access-Control-Allow-Methods
+        let methods_str = truely_allowed_methods.iter().join(", ");
+        res.set_header(Header::new(CORS_METHODS.as_str(), methods_str));
+
+        // Access-Control-Allow-Headers
+        if let Some(requested_headers) = requested_headers {
+            res.set_header(Header::new(
+                CORS_HEADERS.as_str(),
+                requested_headers.iter().join(", "),
+            ));
+        }
+
+        // Access-Control-Max-Age
+        if let Some(max_age) = self.max_age {
+            res.set_header(Header::new(
+                CORS_AGE.as_str(),
+                max_age.as_secs().to_string(),
+            ));
         }
     }
 }
