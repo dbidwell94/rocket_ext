@@ -659,8 +659,7 @@ mod tests {
         expected_set.insert(Method::Post);
         expected_set.insert(Method::Get);
 
-        assert!(true);
-        // assert_eq!(allow_header, Some(expected_set));
+        assert_eq!(allow_header, Some(expected_set));
 
         Ok(())
     }
