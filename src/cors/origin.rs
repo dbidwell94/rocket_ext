@@ -139,6 +139,13 @@ mod tests {
 
         assert_eq!(OriginScheme::Https, origin.scheme);
         assert_eq!("test.com", origin.host);
+        assert_eq!(None, origin.port);
+
+        let origin = Origin::try_from("https://test.com:42")?;
+
+        assert_eq!(OriginScheme::Https, origin.scheme);
+        assert_eq!("test.com", origin.host);
+        assert_eq!(Some(42), origin.port);
 
         Ok(())
     }
@@ -149,6 +156,13 @@ mod tests {
 
         assert_eq!(OriginScheme::Https, origin.scheme);
         assert_eq!("test.com", origin.host);
+        assert_eq!(None, origin.port);
+
+        let origin = Origin::try_from(String::from("https://test.com:42"))?;
+
+        assert_eq!(OriginScheme::Https, origin.scheme);
+        assert_eq!("test.com", origin.host);
+        assert_eq!(Some(42), origin.port);
 
         Ok(())
     }
@@ -161,6 +175,16 @@ mod tests {
 
         assert_eq!(OriginScheme::Https, origin.scheme);
         assert_eq!("test.com", origin.host);
+        assert_eq!(None, origin.port);
+
+        let ab = Absolute::parse_owned("https://test.com:42".into()).expect("A valid URI");
+
+        let origin = Origin::try_from(ab)?;
+
+        assert_eq!(OriginScheme::Https, origin.scheme);
+        assert_eq!("test.com", origin.host);
+        assert_eq!(Some(42), origin.port);
+
         Ok(())
     }
 
@@ -172,6 +196,16 @@ mod tests {
 
         assert_eq!(OriginScheme::Https, origin.scheme);
         assert_eq!("test.com", origin.host);
+        assert_eq!(None, origin.port);
+
+        let uri = Uri::parse_any("https://test.com:42").expect("A valid uri");
+
+        let origin = Origin::try_from(uri)?;
+
+        assert_eq!(OriginScheme::Https, origin.scheme);
+        assert_eq!("test.com", origin.host);
+        assert_eq!(Some(42), origin.port);
+
         Ok(())
     }
 
@@ -184,6 +218,14 @@ mod tests {
         };
 
         assert_eq!("https://test.com", origin.to_string());
+
+        let origin = Origin {
+            scheme: OriginScheme::Https,
+            host: "test.com".into(),
+            port: Some(42),
+        };
+
+        assert_eq!("https://test.com:42", origin.to_string());
 
         Ok(())
     }
@@ -208,5 +250,12 @@ mod tests {
             port: None,
         };
         assert_eq!(origin.to_string(), "http://localhost");
+
+        let origin = Origin {
+            scheme: OriginScheme::Http,
+            host: "localhost".into(),
+            port: Some(42),
+        };
+        assert_eq!(origin.to_string(), "http://localhost:42");
     }
 }
