@@ -43,11 +43,13 @@ impl TryFrom<&str> for OriginScheme {
 pub struct Origin {
     pub(crate) host: String,
     pub(crate) scheme: OriginScheme,
+    pub(crate) port: Option<u16>,
 }
 
 impl std::fmt::Display for Origin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}://{}", self.scheme, self.host)
+        let port_suffix = self.port.map(|port| format!(":{port}")).unwrap_or_default();
+        write!(f, "{}://{}{}", self.scheme, self.host, port_suffix)
     }
 }
 
@@ -63,8 +65,9 @@ impl TryFrom<&str> for Origin {
         };
 
         let host = authority.host().to_owned();
+        let port = authority.port();
 
-        Ok(Self { scheme, host })
+        Ok(Self { scheme, host, port })
     }
 }
 
@@ -94,8 +97,9 @@ impl<'a> TryFrom<Absolute<'a>> for Origin {
         };
 
         let host = authority.host().to_owned();
+        let port = authority.port().to_owned();
 
-        Ok(Self { scheme, host })
+        Ok(Self { scheme, host, port })
     }
 }
 
@@ -176,6 +180,7 @@ mod tests {
         let origin = Origin {
             scheme: OriginScheme::Https,
             host: "test.com".into(),
+            port: None,
         };
 
         assert_eq!("https://test.com", origin.to_string());
@@ -200,6 +205,7 @@ mod tests {
         let origin = Origin {
             scheme: OriginScheme::Http,
             host: "localhost".into(),
+            port: None,
         };
         assert_eq!(origin.to_string(), "http://localhost");
     }
