@@ -674,7 +674,8 @@ mod tests {
         assert_eq!(origins.len(), 1);
         assert!(origins.contains(&Origin {
             scheme: OriginScheme::Https,
-            host: String::from("test.com")
+            host: String::from("test.com"),
+            port: None
         }));
 
         Ok(())
@@ -691,11 +692,13 @@ mod tests {
         assert_eq!(origins.len(), 2);
         assert!(origins.contains(&Origin {
             scheme: OriginScheme::Https,
-            host: String::from("test.com")
+            host: String::from("test.com"),
+            port: None
         }));
         assert!(origins.contains(&Origin {
             scheme: OriginScheme::Https,
-            host: String::from("example.com")
+            host: String::from("example.com"),
+            port: None
         }));
 
         Ok(())
